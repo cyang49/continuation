@@ -2,12 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HEAP_STACK_SIZE (1024)  // allocate 1KB block as stack
+#define HEAP_STACK_SIZE (1024*1024)  // allocate 1KB block as stack
 
-register char * const basepointer asm("rbp");
-register char * const stackpointer asm("rsp");
 
 int func3(int x, int y) {
+    register char * const basepointer asm("rbp");
+    register char * const stackpointer asm("rsp");
     printf("In func3\n");
     //printf("func3 frame address (0) %p\n", __builtin_frame_address(0));
     //printf("func3 frame address (1) %p\n", __builtin_frame_address(1));
@@ -18,6 +18,8 @@ int func3(int x, int y) {
 }
 
 int func2(int x, int y) {
+    register char * const basepointer asm("rbp");
+    register char * const stackpointer asm("rsp");
     printf("In func2\n");
     //printf("func2 frame address (0) %p\n", __builtin_frame_address(0));
     //printf("func2 frame address (1) %p\n", __builtin_frame_address(1));
@@ -29,6 +31,8 @@ int func2(int x, int y) {
 
 int func1(int x, int y) {
     int a, b;
+    register char * const basepointer asm("rbp");
+    register char * const stackpointer asm("rsp");
     printf("In func1\n");
     //printf("func1 frame address (0) %p\n", __builtin_frame_address(0));
     //printf("func1 frame address (1) %p\n", __builtin_frame_address(1));
@@ -40,6 +44,8 @@ int func1(int x, int y) {
 }
 
 int main(int argc, char** argv) {
+    register char * const basepointer asm("rbp");
+    register char * const stackpointer asm("rsp");
     int ret1;
     int x = 3;
     int y = 5;
@@ -54,6 +60,7 @@ int main(int argc, char** argv) {
 
     // Allocate heap memory as stack
     char * mystack = malloc(HEAP_STACK_SIZE);
+    printf("Allocated heap space starts at %p\n", mystack);
 
     // Copy current stack frame
     // Store registers
