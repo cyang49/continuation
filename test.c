@@ -104,6 +104,9 @@ int main(int argc, char** argv) {
         :"r"(oldbp), "r"(oldsp)
        );
 
+    // The return value from function one is not recovered
+    // A memory copy is required
+    memcpy(oldsp, newsp, basepointer - stackpointer);
     printf("ret1 = %d\n", ret1);
 
     return 0;
