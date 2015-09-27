@@ -108,6 +108,7 @@ int main(int argc, char** argv) {
     // A memory copy is required
     memcpy(oldsp, newsp, basepointer - stackpointer);
     printf("ret1 = %d\n", ret1);
+    free(mystack);
 
     return 0;
 }
