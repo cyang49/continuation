@@ -9,6 +9,7 @@
 
 #define NUM_SLAVES (4)
 #define DB_STACK_SIZE (256*1024*1024) // 256 MB for now
+#define RED_ZONE_SIZE (128)
 
 typedef struct {
     char*       originalbp;
@@ -19,6 +20,7 @@ typedef struct {
     ocrGuid_t   self_context_guid;
     jmp_buf     env;
     char        stack[DB_STACK_SIZE];
+    long int    callee_saved[5];
 } Context;
 
 ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[]);
@@ -66,7 +68,7 @@ int hta_map(int pid, Context* context)
     // create continuation codelet procEdt
     ocrGuid_t procEdt_template_guid;
     ocrGuid_t procEdt_guid;
-    ocrEdtTemplateCreate(&procEdt_template_guid, procEdt, 0, 2+NUM_SLAVES);
+    ocrEdtTemplateCreate(&procEdt_template_guid, procEdt, 0, 3+NUM_SLAVES);
 
     ocrGuid_t depv[3+NUM_SLAVES];
     depv[0] = UNINITIALIZED_GUID;
@@ -92,13 +94,13 @@ int hta_map(int pid, Context* context)
         char* originalbp = context->originalbp;
         char* threadsp = originalbp - size_to_copy;
         char* threadbp = threadsp + (basepointer-stackpointer);
-        // 3. fix frame link addresses FIXME
-        // 4. copy DB stack to overwrite thread stack
+        // 3. copy DB stack to overwrite thread stack
         printf("Enabling continuation codelet\n");
         printf("switching back to thread stack at (%p - %p) original bp (%p)\n", threadsp, threadbp, originalbp);
-        memcpy(threadsp, stackpointer, size_to_copy);
-        // 5. set rsp and rbp to point to thread stack
+        memcpy(threadsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, size_to_copy + RED_ZONE_SIZE);
+        // 4. fix frame link addresses 
         _fix_pointers(basepointer, threadbp, originalbp);
+        // 5. set rsp and rbp to point to thread stack. Stop writing to context->stack
         __asm volatile(
             "movq %0, %%rbp;"
             "movq %1, %%rsp;"
@@ -121,18 +123,47 @@ int hta_map(int pid, Context* context)
 
 int hta_main(int argc, char** argv, int pid, Context* context)
 {
+    int some_stack_variable = -111;
+    int other_stack_variable = 202;
     
     // call a parallel operation 
     if(hta_map(pid, context)) // slave codelets are created in here
         return 1;
 
     // some computation
+    printf("some stack variable = %d, other stack variable = %d\n", some_stack_variable, other_stack_variable);
     
     // call a second parallel operation
 
     // the second continue
  
     printf("return from hta_main()\n");
+
+    // must restore thread stack before going back to normal execution
+    {
+        register char * const basepointer __asm("rbp");
+        register char * const stackpointer __asm("rsp");
+        // switch back to thread stack
+        // 1. compute the size that need to be copied (the growth of DB stack)
+        size_t size_to_copy = (context->stack + DB_STACK_SIZE) - stackpointer;
+        printf("stack size growth = 0x%x\n", size_to_copy);
+        // 2. compute the start address of the thread stack
+        char* originalbp = context->originalbp;
+        char* threadsp = originalbp - size_to_copy;
+        char* threadbp = threadsp + (basepointer-stackpointer);
+        // 3. copy DB stack to overwrite thread stack
+        printf("switching back to thread stack at (%p - %p) original bp (%p)\n", threadsp, threadbp, originalbp);
+        memcpy(threadsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, size_to_copy + RED_ZONE_SIZE);
+        // 4. fix frame link addresses 
+        _fix_pointers(basepointer, threadbp, originalbp);
+        // 5. set rsp and rbp to point to thread stack. Stop writing to context->stack
+        __asm volatile(
+            "movq %0, %%rbp;"
+            "movq %1, %%rsp;"
+            :
+            :"r"(threadbp), "r"(threadsp)
+           );
+    }
     return 0;
 }
 
@@ -142,20 +173,21 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
     register char * const basepointer __asm("rbp");
     register char * const stackpointer __asm("rsp");
     if(depc > 1) { // it's a continuation
-        char *newsp, *newbp;
+        //char *newsp, *newbp;
         Context *context = (Context*) depv[2].ptr;
         context->originalbp = basepointer;
         context->originalsp = stackpointer;
-        newbp = context->continuebp;
-        newsp = context->continuesp;
+        // Store callee saved registers
+        __asm volatile(
+            "movq %%rbx, %0;"
+            "movq %%r12, %1;"
+            "movq %%r13, %2;"
+            "movq %%r14, %3;"
+            "movq %%r15, %4;"
+            :"=r"(context->callee_saved[0]), "=r"(context->callee_saved[1]), "=r"(context->callee_saved[2]), "=r"(context->callee_saved[3]), "=r"(context->callee_saved[4])
+            :
+           );
 
-        printf("continue bp = %p\n", newbp);
-        printf("continue sp = %p\n", newsp);
-        //__asm volatile("movq %0, %%rbp;"
-        //    "movq %1, %%rsp;"
-        //    :
-        //    :"r"(newbp), "r"(newsp)
-        //   );
         longjmp(context->env, 0);
         // will never reach here
         assert(0 && "Program execution should never reach here");
@@ -195,7 +227,7 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         newsp = newbp - (oldbp - oldsp);
 
         // Copy stack frame. This has to happen after the stack variable values are computed
-        memcpy(newsp, stackpointer, basepointer - stackpointer);
+        memcpy(newsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, basepointer - stackpointer + RED_ZONE_SIZE);
         printf("Stack frame dumped. Switching frame pointer and stack pointer\n");
         // After this line, stack variables should be read only to be safe
         __asm volatile("movq %0, %%rbp;"
@@ -212,7 +244,17 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
 
         if(hta_main(argc, argv, 0, context) == 0) {
             printf("last procEdt. shutting down runtime\n");
-            //ocrShutdown();
+            // Restore callee-saved registers FIXME: placement is not right
+            __asm volatile(
+                "movq %0, %%rbx;"
+                "movq %1, %%r12;"
+                "movq %2, %%r13;"
+                "movq %3, %%r14;"
+                "movq %4, %%r15;"
+                :
+                :"r"(context->callee_saved[0]), "r"(context->callee_saved[1]), "r"(context->callee_saved[2]), "r"(context->callee_saved[3]), "r"(context->callee_saved[4])
+               );
+            ocrShutdown();
         }
         else
             printf("procEdt single phase finished, will be continued\n");
