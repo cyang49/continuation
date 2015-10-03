@@ -6,8 +6,8 @@
 
 
 int func3(int x, int y) {
-    register char * const basepointer asm("rbp");
-    register char * const stackpointer asm("rsp");
+    register char * const basepointer __asm("rbp");
+    register char * const stackpointer __asm("rsp");
     printf("In func3\n");
     //printf("func3 frame address (0) %p\n", __builtin_frame_address(0));
     //printf("func3 frame address (1) %p\n", __builtin_frame_address(1));
@@ -18,8 +18,8 @@ int func3(int x, int y) {
 }
 
 int func2(int x, int y) {
-    register char * const basepointer asm("rbp");
-    register char * const stackpointer asm("rsp");
+    register char * const basepointer __asm("rbp");
+    register char * const stackpointer __asm("rsp");
     printf("In func2\n");
     //printf("func2 frame address (0) %p\n", __builtin_frame_address(0));
     //printf("func2 frame address (1) %p\n", __builtin_frame_address(1));
@@ -31,8 +31,8 @@ int func2(int x, int y) {
 
 int func1(int x, int y) {
     int a, b;
-    register char * const basepointer asm("rbp");
-    register char * const stackpointer asm("rsp");
+    register char * const basepointer __asm("rbp");
+    register char * const stackpointer __asm("rsp");
     printf("In func1\n");
     //printf("func1 frame address (0) %p\n", __builtin_frame_address(0));
     //printf("func1 frame address (1) %p\n", __builtin_frame_address(1));
@@ -44,8 +44,8 @@ int func1(int x, int y) {
 }
 
 int main(int argc, char** argv) {
-    register char * const basepointer asm("rbp");
-    register char * const stackpointer asm("rsp");
+    register char * const basepointer __asm("rbp");
+    register char * const stackpointer __asm("rsp");
     int ret1;
     int x = 3;
     int y = 5;
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     memcpy(newsp, stackpointer, basepointer - stackpointer);
     printf("Stack frame dumped. Switching frame pointer and stack pointer\n");
     // After this line, stack variables should be read only to be safe
-    asm volatile("movq %0, %%rbp;"
+    __asm volatile("movq %0, %%rbp;"
         "movq %1, %%rsp;"
         :
         :"r"(newbp), "r"(newsp)
@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
     //basepointer = oldbp;
     //stackpointer = oldsp;
     printf("Returned from func1, restoring stack frame\n");
-    asm volatile(
+    __asm volatile(
         "movq %0, %%rbp;"
         "movq %1, %%rsp;"
         :

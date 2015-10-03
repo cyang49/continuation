@@ -1,6 +1,5 @@
-CC=gcc
-OPT=-O0 
-#OPT=-O0 -g
+CC=gcc -std=c99
+OPT=-O0 -g
 # Notice that -fno-omit-frame-pointer is needed so that when compiler optimization
 # is on, %rbp will be used and so it is possible to calculate stack frame size.
 GCC_OPT=-fno-asynchronous-unwind-tables -fno-omit-frame-pointer
@@ -19,7 +18,7 @@ TARGET=$(SRC:.c=)
 all: $(TARGET)
 
 %.s: %.c
-	$(CC) -S $(CFLAGS) $<  
+	$(CC) -S $(OCR_FLAGS) $(OCR_LDFLAGS) $(CFLAGS) $<  
 
 %: %.c
 	$(CC) $(CFLAGS) $(OCR_FLAGS) $(OCR_LDFLAGS) $< -o $@
