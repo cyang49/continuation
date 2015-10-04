@@ -9,9 +9,15 @@
 
 #define NUM_SLAVES (4)
 #define DB_STACK_SIZE (256*1024*1024) // 256 MB for now
-#define RED_ZONE_SIZE (128)
+#define RED_ZONE_SIZE (0)
+#define NUM_CALLEE_SAVED_REGS (6)
+
+#define HTA_OP_FINISHED (0)
+#define HTA_OP_TO_BE_CONTINUED (1)
 
 typedef struct {
+    unsigned int phase;
+    unsigned int oldphase;
     char*       originalbp;
     char*       originalsp;
     char*       continuebp;
@@ -20,7 +26,8 @@ typedef struct {
     ocrGuid_t   self_context_guid;
     jmp_buf     env;
     char        stack[DB_STACK_SIZE];
-    long int    callee_saved[5];
+    long int    callee_saved[NUM_CALLEE_SAVED_REGS];        // separate storage location for callee saved register values
+    long int    callee_restore[NUM_CALLEE_SAVED_REGS];      // to avoid race condition
 } Context;
 
 ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[]);
@@ -32,6 +39,8 @@ ocrGuid_t slaveEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
     return NULL_GUID; // satisfies control dependency of the continuation codelet
 }
 
+
+// This function fix pointers that points to thread stack addresses
 void _fix_pointers(void* db_bp, void *thread_bp, void* max_thread_bp) {
     while(thread_bp < max_thread_bp) {
         size_t frame_size = *((void**)db_bp) - db_bp;
@@ -47,6 +56,11 @@ int hta_map(int pid, Context* context)
     register char * const stackpointer __asm("rsp");
     context->continuesp = stackpointer;
     context->continuebp = basepointer;
+
+    //======================================================================
+    // perform map
+    //======================================================================
+
     // create slave EDTs
     ocrGuid_t slaveEdt_template_guid;
     ocrGuid_t slaveEdts[NUM_SLAVES];
@@ -54,6 +68,7 @@ int hta_map(int pid, Context* context)
     ocrGuid_t slaveInDBs[NUM_SLAVES];
 
     ocrEdtTemplateCreate(&slaveEdt_template_guid, slaveEdt, 0, 2);
+    printf("slaveEDT template guid %lx\n", slaveEdt_template_guid);
     for(int i = 0; i < NUM_SLAVES; i++) {
         int *data;
         slaveOutEvent[i] = NULL_GUID;
@@ -65,7 +80,9 @@ int hta_map(int pid, Context* context)
     }
     ocrEdtTemplateDestroy(slaveEdt_template_guid);
 
-    // create continuation codelet procEdt
+    //======================================================================
+    // Create continuation to wait for slave EDTs to finish
+    //======================================================================
     ocrGuid_t procEdt_template_guid;
     ocrGuid_t procEdt_guid;
     ocrEdtTemplateCreate(&procEdt_template_guid, procEdt, 0, 3+NUM_SLAVES);
@@ -77,6 +94,8 @@ int hta_map(int pid, Context* context)
     for(int i = 0; i < NUM_SLAVES; i++)
         depv[3+i] = slaveOutEvent[i];
     ocrEdtCreate(&procEdt_guid, procEdt_template_guid, /*paramc=*/0, /*paramv=*/(u64 *)NULL, /*depc=*/EDT_PARAM_DEF, /*depv=*/depv, /*properties=*/0 , /*affinity*/NULL_GUID,  /*outputEvent*/NULL );
+    printf("continuation procEDT template guid %lx\n", procEdt_template_guid);
+    printf("continuation procEDT guid %lx\n", procEdt_guid);
 
     // defer firing slave EDTs
     for(int i = 0; i < NUM_SLAVES; i++) {
@@ -84,6 +103,7 @@ int hta_map(int pid, Context* context)
     }
     ocrEdtTemplateDestroy(procEdt_template_guid);
     
+    // setjmp call creates a continuation point
     if(!setjmp(context->env)) 
     {
         // switch back to thread stack
@@ -107,19 +127,36 @@ int hta_map(int pid, Context* context)
             :
             :"r"(threadbp), "r"(threadsp)
            );
+        // before enabling continuation, copy the callee saved registers for this EDT to terminate normally
+        context->oldphase = context->phase;
+        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
+            context->callee_restore[i] = context->callee_saved[i];
+        }
         ocrAddDependence(NULL_GUID, procEdt_guid, 0, DB_DEFAULT_MODE);
 
-        return 1;
+        return HTA_OP_TO_BE_CONTINUED;
     }
     else
     {
         // Continuation should start from here
         printf("hta_map is continued\n");
         
-        return 0;
+        // Stack pointer/base pointer are not changed here because it will
+        // keep using context->stack
+        // before enabling continuation, copy the callee saved registers for this EDT to terminate normally
+        context->oldphase = context->phase;
+        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
+            context->callee_restore[i] = context->callee_saved[i];
+        }
+        return HTA_OP_FINISHED;
     }
 }
 
+#define HTA_PARALLEL_OP(func_call) \
+    if((func_call) != HTA_OP_FINISHED) { \
+        printf("hta_main split\n"); \
+        return 1; \
+    }
 
 int hta_main(int argc, char** argv, int pid, Context* context)
 {
@@ -127,17 +164,27 @@ int hta_main(int argc, char** argv, int pid, Context* context)
     int other_stack_variable = 202;
     
     // call a parallel operation 
-    if(hta_map(pid, context)) // slave codelets are created in here
-        return 1;
+    HTA_PARALLEL_OP(hta_map(pid, context)); // slave codelets are created in here
 
-    // some computation
     printf("some stack variable = %d, other stack variable = %d\n", some_stack_variable, other_stack_variable);
+    // some computation
+    some_stack_variable = -222;
+    other_stack_variable = 404;
     
     // call a second parallel operation
+    HTA_PARALLEL_OP(hta_map(pid, context)); // slave codelets are created in here
 
-    // the second continue
- 
-    printf("return from hta_main()\n");
+    printf("some stack variable = %d, other stack variable = %d\n", some_stack_variable, other_stack_variable);
+    // some computation
+    some_stack_variable = -333;
+    other_stack_variable = 808;
+    
+    // call a second parallel operation
+    HTA_PARALLEL_OP(hta_map(pid, context)); // slave codelets are created in here
+
+    printf("some stack variable = %d, other stack variable = %d\n", some_stack_variable, other_stack_variable);
+
+    printf("hta_main() finishing\n");
 
     // must restore thread stack before going back to normal execution
     {
@@ -175,6 +222,8 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
     if(depc > 1) { // it's a continuation
         //char *newsp, *newbp;
         Context *context = (Context*) depv[2].ptr;
+        context->phase++;
+        int phase = context->phase;
         context->originalbp = basepointer;
         context->originalsp = stackpointer;
         // Store callee saved registers
@@ -184,9 +233,16 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
             "movq %%r13, %2;"
             "movq %%r14, %3;"
             "movq %%r15, %4;"
-            :"=r"(context->callee_saved[0]), "=r"(context->callee_saved[1]), "=r"(context->callee_saved[2]), "=r"(context->callee_saved[3]), "=r"(context->callee_saved[4])
+            "movq %%rbp, %5;"
+            :"=r"(context->callee_saved[0]), "=r"(context->callee_saved[1]), "=r"(context->callee_saved[2]), "=r"(context->callee_saved[3]), "=r"(context->callee_saved[4]), "=r"(context->callee_saved[5])
             :
            );
+        printf("(%d) saving rbx = 0x%012lx\n", phase, context->callee_saved[0]);
+        printf("(%d) saving r12 = 0x%012lx\n", phase, context->callee_saved[1]);
+        printf("(%d) saving r13 = 0x%012lx\n", phase, context->callee_saved[2]);
+        printf("(%d) saving r14 = 0x%012lx\n", phase, context->callee_saved[3]);
+        printf("(%d) saving r15 = 0x%012lx\n", phase, context->callee_saved[4]);
+        printf("(%d) saving rbp = 0x%012lx\n", phase, context->callee_saved[5]);
 
         longjmp(context->env, 0);
         // will never reach here
@@ -198,6 +254,9 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         ocrGuid_t context_guid;
         Context *context;
         ocrDbCreate(&context_guid, (void**) &context, sizeof(Context), /*flags=*/DB_PROP_NONE, /*affinity=*/NULL_GUID, NO_ALLOC);
+        printf("context DB guid %lx\n", context_guid);
+        context->phase = 0;
+        int phase = context->phase;
         context->args = depv[0].guid;
         context->self_context_guid = context_guid;
         context->originalbp = basepointer;
@@ -209,12 +268,12 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
             char *arg = getArgv(depv[0].ptr, i);
             argv[i] = arg;
         }
-        printf("procEdt is executed\n");
-        printf("procEdt frame address (0) %p\n", __builtin_frame_address(0));
-        printf("procEdt rbp %p\n", basepointer);
-        printf("procEdt rsp %p\n", stackpointer);
-        printf("procEdt stack frame size = 0x%x\n", basepointer - stackpointer);
-        printf("procEdt allocated DB stack %p - %p\n", context->stack, context->stack + DB_STACK_SIZE - 1);
+        printf("(%d) procEdt is executed\n", phase);
+        printf("(%d) procEdt frame address (0) %p\n", phase, __builtin_frame_address(0));
+        printf("(%d) procEdt rbp %p\n", phase, basepointer);
+        printf("(%d) procEdt rsp %p\n", phase, stackpointer);
+        printf("(%d) procEdt stack frame size = 0x%x\n", phase, basepointer - stackpointer);
+        printf("(%d) procEdt allocated DB stack %p - %p\n", phase, context->stack, context->stack + DB_STACK_SIZE - 1);
 
         // =========================
         // Setup stack frame
@@ -226,6 +285,23 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         newbp = (context->stack + DB_STACK_SIZE);
         newsp = newbp - (oldbp - oldsp);
 
+        // Store callee saved registers
+        __asm volatile(
+            "movq %%rbx, %0;"
+            "movq %%r12, %1;"
+            "movq %%r13, %2;"
+            "movq %%r14, %3;"
+            "movq %%r15, %4;"
+            "movq %%rbp, %5;"
+            :"=r"(context->callee_saved[0]), "=r"(context->callee_saved[1]), "=r"(context->callee_saved[2]), "=r"(context->callee_saved[3]), "=r"(context->callee_saved[4]), "=r"(context->callee_saved[5])
+            :
+           );
+        printf("(%d) saving rbx = 0x%012lx\n", phase, context->callee_saved[0]);
+        printf("(%d) saving r12 = 0x%012lx\n", phase, context->callee_saved[1]);
+        printf("(%d) saving r13 = 0x%012lx\n", phase, context->callee_saved[2]);
+        printf("(%d) saving r14 = 0x%012lx\n", phase, context->callee_saved[3]);
+        printf("(%d) saving r15 = 0x%012lx\n", phase, context->callee_saved[4]);
+        printf("(%d) saving rbp = 0x%012lx\n", phase, context->callee_saved[5]);
         // Copy stack frame. This has to happen after the stack variable values are computed
         memcpy(newsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, basepointer - stackpointer + RED_ZONE_SIZE);
         printf("Stack frame dumped. Switching frame pointer and stack pointer\n");
@@ -236,29 +312,59 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
             :"r"(newbp), "r"(newsp)
            );
 
-        printf("Stack frame switched to data block space\n");
-        printf("(db) procEdt frame address (0) %p\n", __builtin_frame_address(0));
-        printf("(db) procEdt rbp %p\n", basepointer);
-        printf("(db) procEdt rsp %p\n", stackpointer);
-        printf("(db) procEdt stack frame size = 0x%x\n", basepointer - stackpointer);
+        printf("(%d) Stack frame switched to data block space\n", phase);
+        printf("(%d) (db) procEdt frame address (0) %p\n", phase, __builtin_frame_address(0));
+        printf("(%d) (db) procEdt rbp %p\n", phase, basepointer);
+        printf("(%d) (db) procEdt rsp %p\n", phase, stackpointer);
+        printf("(%d) (db) procEdt stack frame size = 0x%x\n", phase, basepointer - stackpointer);
 
         if(hta_main(argc, argv, 0, context) == 0) {
-            printf("last procEdt. shutting down runtime\n");
+            phase = context->oldphase;
+            printf("(%d) last procEdt. shutting down runtime\n", phase);
             // Restore callee-saved registers FIXME: placement is not right
+            printf("(%d) Restore callee saved registers before returning to OCR runtime\n", phase);
+            printf("(%d) Restoring rbx = 0x%012lx\n", phase, context->callee_restore[0]);
+            printf("(%d) Restoring r12 = 0x%012lx\n", phase, context->callee_restore[1]);
+            printf("(%d) Restoring r13 = 0x%012lx\n", phase, context->callee_restore[2]);
+            printf("(%d) Restoring r14 = 0x%012lx\n", phase, context->callee_restore[3]);
+            printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_restore[4]);
+            printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_restore[5]);
             __asm volatile(
                 "movq %0, %%rbx;"
                 "movq %1, %%r12;"
                 "movq %2, %%r13;"
                 "movq %3, %%r14;"
                 "movq %4, %%r15;"
+                "movq %5, %%rbp;"
                 :
-                :"r"(context->callee_saved[0]), "r"(context->callee_saved[1]), "r"(context->callee_saved[2]), "r"(context->callee_saved[3]), "r"(context->callee_saved[4])
+                :"r"(context->callee_restore[0]), "r"(context->callee_restore[1]), "r"(context->callee_restore[2]), "r"(context->callee_restore[3]), "r"(context->callee_restore[4]), "r"(context->callee_restore[5])
                );
             ocrShutdown();
+            return NULL_GUID;
         }
-        else
-            printf("procEdt single phase finished, will be continued\n");
+        else {
+            phase = context->oldphase;
+            printf("(%d) procEdt single phase finished, will be continued\n", phase);
+        }
 
+        // Restore callee-saved registers FIXME: placement is not right
+        printf("(%d) Restore callee saved registers before returning to OCR runtime\n", phase);
+        printf("(%d) Restoring rbx = 0x%012lx\n", phase, context->callee_restore[0]);
+        printf("(%d) Restoring r12 = 0x%012lx\n", phase, context->callee_restore[1]);
+        printf("(%d) Restoring r13 = 0x%012lx\n", phase, context->callee_restore[2]);
+        printf("(%d) Restoring r14 = 0x%012lx\n", phase, context->callee_restore[3]);
+        printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_restore[4]);
+        printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_restore[5]);
+        __asm volatile(
+            "movq %0, %%rbx;"
+            "movq %1, %%r12;"
+            "movq %2, %%r13;"
+            "movq %3, %%r14;"
+            "movq %4, %%r15;"
+            "movq %5, %%rbp;"
+            :
+            :"r"(context->callee_restore[0]), "r"(context->callee_restore[1]), "r"(context->callee_restore[2]), "r"(context->callee_restore[3]), "r"(context->callee_restore[4]), "r"(context->callee_restore[5])
+           );
     }
     return NULL_GUID;
 }
@@ -271,6 +377,8 @@ ocrGuid_t mainEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
     ocrGuid_t procEdt_guid;
     ocrEdtTemplateCreate(&procEdt_template_guid, procEdt, 0, 1);
     ocrEdtCreate(&procEdt_guid, procEdt_template_guid, /*paramc=*/0, /*paramv=*/(u64 *)NULL, /*depc=*/1, /*depv=*/NULL, /*properties=*/0 , /*affinity*/NULL_GUID,  /*outputEvent*/NULL );
+    printf("procEDT template guid %lx\n", procEdt_template_guid);
+    printf("procEDT guid %lx\n", procEdt_guid);
 
     // Add proc EDT dependences
     ocrAddDependence(depv[0].guid, procEdt_guid, 0, DB_MODE_RW); // argc and argv // Immediately satisfy
