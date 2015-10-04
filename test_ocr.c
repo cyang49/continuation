@@ -20,8 +20,8 @@ typedef struct {
     unsigned int oldphase;
     char*       originalbp;
     char*       originalsp;
-    char*       continuebp;
-    char*       continuesp;
+    //char*       continuebp;
+    //char*       continuesp;
     ocrGuid_t   args;
     ocrGuid_t   self_context_guid;
     jmp_buf     env;
@@ -54,8 +54,8 @@ int hta_map(int pid, Context* context)
 {
     register char * const basepointer __asm("rbp");
     register char * const stackpointer __asm("rsp");
-    context->continuesp = stackpointer;
-    context->continuebp = basepointer;
+    //context->continuesp = stackpointer;
+    //context->continuebp = basepointer;
 
     //======================================================================
     // perform map
@@ -109,7 +109,7 @@ int hta_map(int pid, Context* context)
         // switch back to thread stack
         // 1. compute the size that need to be copied (the growth of DB stack)
         size_t size_to_copy = (context->stack + DB_STACK_SIZE) - stackpointer;
-        printf("stack size growth = 0x%x\n", size_to_copy);
+        printf("db stack (%p - %p) stack size growth = 0x%x\n", stackpointer, context->stack+DB_STACK_SIZE-1, size_to_copy);
         // 2. compute the start address of the thread stack
         char* originalbp = context->originalbp;
         char* threadsp = originalbp - size_to_copy;
@@ -134,6 +134,7 @@ int hta_map(int pid, Context* context)
         }
         ocrAddDependence(NULL_GUID, procEdt_guid, 0, DB_DEFAULT_MODE);
 
+        printf("==hta_map splited==\n");
         return HTA_OP_TO_BE_CONTINUED;
     }
     else
@@ -224,6 +225,7 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         Context *context = (Context*) depv[2].ptr;
         context->phase++;
         int phase = context->phase;
+        printf("==========Phase %d starts===========\n", phase);
         context->originalbp = basepointer;
         context->originalsp = stackpointer;
         // Store callee saved registers
