@@ -23,5 +23,7 @@ all: $(TARGET)
 %: %.c
 	$(CC) $(CFLAGS) $(OCR_FLAGS) $(OCR_LDFLAGS) $< -o $@
 
+%_asm: %.s
+	$(CC) $(CFLAGS) $(OCR_FLAGS) $(OCR_LDFLAGS) $< -o $@
 clean:
-	rm -f *.o *.s $(TARGET)
+	rm -f *.o *.s $(TARGET) *_asm

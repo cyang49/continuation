@@ -72,7 +72,7 @@ int hta_map(int pid, Context* context)
     for(int i = 0; i < NUM_SLAVES; i++) {
         int *data;
         slaveOutEvent[i] = NULL_GUID;
-        ocrDbCreate(&slaveInDBs[i], (void**) &data, sizeof(int), /*flags=*/DB_PROP_NONE, /*affinity=*/NULL_GUID, NO_ALLOC);
+        ocrDbCreate(&slaveInDBs[i], (void**) &data, sizeof(int), /*flags=*/DB_PROP_NO_ACQUIRE, /*affinity=*/NULL_GUID, NO_ALLOC);
         ocrEdtCreate(&slaveEdts[i], slaveEdt_template_guid, /*paramc=*/0, /*paramv=*/(u64 *)NULL, /*depc=*/2, /*depv=*/NULL, /*properties=*/0 , /*affinity*/NULL_GUID,  &slaveOutEvent[i]);
         ocrAddDependence(slaveInDBs[i], slaveEdts[i], 1, DB_DEFAULT_MODE); // Immediately satisfy
         printf("slave %d EDT guid %lx\n", i, slaveEdts[i]);
@@ -120,18 +120,18 @@ int hta_map(int pid, Context* context)
         memcpy(threadsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, size_to_copy + RED_ZONE_SIZE);
         // 4. fix frame link addresses 
         _fix_pointers(basepointer, threadbp, originalbp);
-        // 5. set rsp and rbp to point to thread stack. Stop writing to context->stack
+        // 5. before enabling continuation, copy the callee saved registers for this EDT to terminate normally
+        context->oldphase = context->phase;
+        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
+            context->callee_restore[i] = context->callee_saved[i];
+        }
+        // 6. set rsp and rbp to point to thread stack. Stop writing to context->stack
         __asm volatile(
             "movq %0, %%rbp;"
             "movq %1, %%rsp;"
             :
             :"r"(threadbp), "r"(threadsp)
            );
-        // before enabling continuation, copy the callee saved registers for this EDT to terminate normally
-        context->oldphase = context->phase;
-        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
-            context->callee_restore[i] = context->callee_saved[i];
-        }
         ocrAddDependence(NULL_GUID, procEdt_guid, 0, DB_DEFAULT_MODE);
 
         printf("==hta_map splited==\n");
@@ -144,11 +144,6 @@ int hta_map(int pid, Context* context)
         
         // Stack pointer/base pointer are not changed here because it will
         // keep using context->stack
-        // before enabling continuation, copy the callee saved registers for this EDT to terminate normally
-        context->oldphase = context->phase;
-        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
-            context->callee_restore[i] = context->callee_saved[i];
-        }
         return HTA_OP_FINISHED;
     }
 }
@@ -204,7 +199,12 @@ int hta_main(int argc, char** argv, int pid, Context* context)
         memcpy(threadsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, size_to_copy + RED_ZONE_SIZE);
         // 4. fix frame link addresses 
         _fix_pointers(basepointer, threadbp, originalbp);
-        // 5. set rsp and rbp to point to thread stack. Stop writing to context->stack
+        // 5. before enabling continuation, copy the callee saved registers for this EDT to terminate normally
+        context->oldphase = context->phase;
+        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
+            context->callee_restore[i] = context->callee_saved[i];
+        }
+        // 6. set rsp and rbp to point to thread stack. Stop writing to context->stack
         __asm volatile(
             "movq %0, %%rbp;"
             "movq %1, %%rsp;"
@@ -230,9 +230,9 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         context->originalsp = stackpointer;
         // Store callee saved registers
         __asm volatile(
-            "movq %%rbx, %0;"
-            "movq %%r12, %1;"
-            "movq %%r13, %2;"
+            "movq -24(%%rbp), %0;" /* rbx */
+            "movq -16(%%rbp), %1;" /* r12 */
+            "movq  -8(%%rbp), %2;" /* r13 */
             "movq %%r14, %3;"
             "movq %%r15, %4;"
             "movq %%rbp, %5;"
@@ -289,9 +289,9 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
 
         // Store callee saved registers
         __asm volatile(
-            "movq %%rbx, %0;"
-            "movq %%r12, %1;"
-            "movq %%r13, %2;"
+            "movq -24(%%rbp), %0;" /* rbx */
+            "movq -16(%%rbp), %1;" /* r12 */
+            "movq  -8(%%rbp), %2;" /* r13 */
             "movq %%r14, %3;"
             "movq %%r15, %4;"
             "movq %%rbp, %5;"
@@ -332,9 +332,9 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
             printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_restore[4]);
             printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_restore[5]);
             __asm volatile(
-                "movq %0, %%rbx;"
-                "movq %1, %%r12;"
-                "movq %2, %%r13;"
+                "movq %0, -24(%%rbp);" /* rbx */
+                "movq %1, -16(%%rbp);" /* r12 */
+                "movq %2,  -8(%%rbp);" /* r13 */
                 "movq %3, %%r14;"
                 "movq %4, %%r15;"
                 "movq %5, %%rbp;"
@@ -358,9 +358,9 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_restore[4]);
         printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_restore[5]);
         __asm volatile(
-            "movq %0, %%rbx;"
-            "movq %1, %%r12;"
-            "movq %2, %%r13;"
+            "movq %0, -24(%%rbp);" /* rbx */
+            "movq %1, -16(%%rbp);" /* r12 */
+            "movq %2,  -8(%%rbp);" /* r13 */
             "movq %3, %%r14;"
             "movq %4, %%r15;"
             "movq %5, %%rbp;"
