@@ -8,7 +8,7 @@
 #include "ocr.h"
 
 #define NUM_SLAVES (4)
-#define DB_STACK_SIZE (256*1024*1024) // 256 MB for now
+#define DB_STACK_SIZE (8*1024*1024) // 8 MB for now
 #define RED_ZONE_SIZE (0)
 #define NUM_CALLEE_SAVED_REGS (6)
 
@@ -16,18 +16,15 @@
 #define HTA_OP_TO_BE_CONTINUED (1)
 
 typedef struct {
-    unsigned int phase;
-    unsigned int oldphase;
-    char*       originalbp;
-    char*       originalsp;
-    //char*       continuebp;
-    //char*       continuesp;
-    ocrGuid_t   args;
-    ocrGuid_t   self_context_guid;
-    jmp_buf     env;
-    char        stack[DB_STACK_SIZE];
+    char        stack[DB_STACK_SIZE];                       // the stack
+    unsigned int phase;                                     // the new phase number
+    char*       originalbp;                                 // the original thread base pointer
+    char*       originalsp;                                 // the original thread stack pointer
+    ocrGuid_t   args;                                       // the command line arguments
+    ocrGuid_t   self_context_guid;                          // the DB guid of the context 
+    ocrGuid_t   next_phase_edt_guid;                        // store the guid of the next phase for deferred activation
+    jmp_buf     env;                                        // the env data structure used in setjmp/longjmp
     long int    callee_saved[NUM_CALLEE_SAVED_REGS];        // separate storage location for callee saved register values
-    long int    callee_restore[NUM_CALLEE_SAVED_REGS];      // to avoid race condition
 } Context;
 
 ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[]);
@@ -54,8 +51,6 @@ int hta_map(int pid, Context* context)
 {
     register char * const basepointer __asm("rbp");
     register char * const stackpointer __asm("rsp");
-    //context->continuesp = stackpointer;
-    //context->continuebp = basepointer;
 
     //======================================================================
     // perform map
@@ -120,11 +115,8 @@ int hta_map(int pid, Context* context)
         memcpy(threadsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, size_to_copy + RED_ZONE_SIZE);
         // 4. fix frame link addresses 
         _fix_pointers(basepointer, threadbp, originalbp);
-        // 5. before enabling continuation, copy the callee saved registers for this EDT to terminate normally
-        context->oldphase = context->phase;
-        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
-            context->callee_restore[i] = context->callee_saved[i];
-        }
+        // 5. store the next phase EDT guid for deferred activation
+        context->next_phase_edt_guid = procEdt_guid;
         // 6. set rsp and rbp to point to thread stack. Stop writing to context->stack
         __asm volatile(
             "movq %0, %%rbp;"
@@ -132,7 +124,6 @@ int hta_map(int pid, Context* context)
             :
             :"r"(threadbp), "r"(threadsp)
            );
-        ocrAddDependence(NULL_GUID, procEdt_guid, 0, DB_DEFAULT_MODE);
 
         printf("==hta_map splited==\n");
         return HTA_OP_TO_BE_CONTINUED;
@@ -199,12 +190,7 @@ int hta_main(int argc, char** argv, int pid, Context* context)
         memcpy(threadsp - RED_ZONE_SIZE, stackpointer - RED_ZONE_SIZE, size_to_copy + RED_ZONE_SIZE);
         // 4. fix frame link addresses 
         _fix_pointers(basepointer, threadbp, originalbp);
-        // 5. before enabling continuation, copy the callee saved registers for this EDT to terminate normally
-        context->oldphase = context->phase;
-        for(int i = 0; i < NUM_CALLEE_SAVED_REGS; i++) {
-            context->callee_restore[i] = context->callee_saved[i];
-        }
-        // 6. set rsp and rbp to point to thread stack. Stop writing to context->stack
+        // 5. set rsp and rbp to point to thread stack. Stop writing to context->stack
         __asm volatile(
             "movq %0, %%rbp;"
             "movq %1, %%rsp;"
@@ -221,7 +207,6 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
     register char * const basepointer __asm("rbp");
     register char * const stackpointer __asm("rsp");
     if(depc > 1) { // it's a continuation
-        //char *newsp, *newbp;
         Context *context = (Context*) depv[2].ptr;
         context->phase++;
         int phase = context->phase;
@@ -321,16 +306,15 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
         printf("(%d) (db) procEdt stack frame size = 0x%x\n", phase, basepointer - stackpointer);
 
         if(hta_main(argc, argv, 0, context) == 0) {
-            phase = context->oldphase;
+            phase = context->phase;
             printf("(%d) last procEdt. shutting down runtime\n", phase);
-            // Restore callee-saved registers FIXME: placement is not right
             printf("(%d) Restore callee saved registers before returning to OCR runtime\n", phase);
-            printf("(%d) Restoring rbx = 0x%012lx\n", phase, context->callee_restore[0]);
-            printf("(%d) Restoring r12 = 0x%012lx\n", phase, context->callee_restore[1]);
-            printf("(%d) Restoring r13 = 0x%012lx\n", phase, context->callee_restore[2]);
-            printf("(%d) Restoring r14 = 0x%012lx\n", phase, context->callee_restore[3]);
-            printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_restore[4]);
-            printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_restore[5]);
+            printf("(%d) Restoring rbx = 0x%012lx\n", phase, context->callee_saved[0]);
+            printf("(%d) Restoring r12 = 0x%012lx\n", phase, context->callee_saved[1]);
+            printf("(%d) Restoring r13 = 0x%012lx\n", phase, context->callee_saved[2]);
+            printf("(%d) Restoring r14 = 0x%012lx\n", phase, context->callee_saved[3]);
+            printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_saved[4]);
+            printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_saved[5]);
             __asm volatile(
                 "movq %0, -24(%%rbp);" /* rbx */
                 "movq %1, -16(%%rbp);" /* r12 */
@@ -339,24 +323,23 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
                 "movq %4, %%r15;"
                 "movq %5, %%rbp;"
                 :
-                :"r"(context->callee_restore[0]), "r"(context->callee_restore[1]), "r"(context->callee_restore[2]), "r"(context->callee_restore[3]), "r"(context->callee_restore[4]), "r"(context->callee_restore[5])
+                :"r"(context->callee_saved[0]), "r"(context->callee_saved[1]), "r"(context->callee_saved[2]), "r"(context->callee_saved[3]), "r"(context->callee_saved[4]), "r"(context->callee_saved[5])
                );
             ocrShutdown();
             return NULL_GUID;
         }
         else {
-            phase = context->oldphase;
+            phase = context->phase;
             printf("(%d) procEdt single phase finished, will be continued\n", phase);
         }
 
-        // Restore callee-saved registers FIXME: placement is not right
         printf("(%d) Restore callee saved registers before returning to OCR runtime\n", phase);
-        printf("(%d) Restoring rbx = 0x%012lx\n", phase, context->callee_restore[0]);
-        printf("(%d) Restoring r12 = 0x%012lx\n", phase, context->callee_restore[1]);
-        printf("(%d) Restoring r13 = 0x%012lx\n", phase, context->callee_restore[2]);
-        printf("(%d) Restoring r14 = 0x%012lx\n", phase, context->callee_restore[3]);
-        printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_restore[4]);
-        printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_restore[5]);
+        printf("(%d) Restoring rbx = 0x%012lx\n", phase, context->callee_saved[0]);
+        printf("(%d) Restoring r12 = 0x%012lx\n", phase, context->callee_saved[1]);
+        printf("(%d) Restoring r13 = 0x%012lx\n", phase, context->callee_saved[2]);
+        printf("(%d) Restoring r14 = 0x%012lx\n", phase, context->callee_saved[3]);
+        printf("(%d) Restoring r15 = 0x%012lx\n", phase, context->callee_saved[4]);
+        printf("(%d) Restoring rbp = 0x%012lx\n", phase, context->callee_saved[5]);
         __asm volatile(
             "movq %0, -24(%%rbp);" /* rbx */
             "movq %1, -16(%%rbp);" /* r12 */
@@ -365,8 +348,9 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
             "movq %4, %%r15;"
             "movq %5, %%rbp;"
             :
-            :"r"(context->callee_restore[0]), "r"(context->callee_restore[1]), "r"(context->callee_restore[2]), "r"(context->callee_restore[3]), "r"(context->callee_restore[4]), "r"(context->callee_restore[5])
+            :"r"(context->callee_saved[0]), "r"(context->callee_saved[1]), "r"(context->callee_saved[2]), "r"(context->callee_saved[3]), "r"(context->callee_saved[4]), "r"(context->callee_saved[5])
            );
+        ocrAddDependence(NULL_GUID, context->next_phase_edt_guid, 0, DB_DEFAULT_MODE); // the continuation is activated here
     }
     return NULL_GUID;
 }
