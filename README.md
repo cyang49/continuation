@@ -11,6 +11,13 @@ test.c: Experiment setting base pointer rbp and satck pointer rsp
 test_ocr.c: The prototype of one process split-phase execution
 
 
+# OCR configurations
+
+Segmentation faults could happen while using Context DB stack.
+Modify the OCR memory allocator to allocate 16-byte aligned
+memory blocks to work around this problem.
+
 To enable guid labeling in OCR, modify the OCR configuration
 file, and replace PTR with LABELED.
+
 
