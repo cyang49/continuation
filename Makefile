@@ -9,7 +9,7 @@ CFLAGS=$(GCC_OPT) $(OPT) -Wall -Wextra
 OCR_FLAGS=-L${OCR_INSTALL}/lib -I${OCR_INSTALL}/include 
 OCR_LDFLAGS=-locr -lpthread
 
-SRC=test.c test_ocr.c
+SRC=test.c test_ocr.c test_guid_labeling.c
 
 ASM=$(SRC:.c=.s)
 
