@@ -7,7 +7,7 @@ GCC_OPT=-fno-asynchronous-unwind-tables -fno-omit-frame-pointer
 CFLAGS=$(GCC_OPT) $(OPT) -Wall -Wextra
 
 OCR_FLAGS=-L${OCR_INSTALL}/lib -I${OCR_INSTALL}/include 
-OCR_LDFLAGS=-locr -lpthread
+OCR_LDFLAGS=-locr -lpthread -lrt
 
 SRC=test.c test_ocr.c test_guid_labeling.c
 
