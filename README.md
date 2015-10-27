@@ -10,6 +10,12 @@ test.c: Experiment setting base pointer rbp and satck pointer rsp
 
 test_ocr.c: The prototype of one process split-phase execution
 
+test_spmd_ocr.c: Prototype considering several processes and split-
+                 phase execution
+
+test_send_ocr.c: Example including point-to-point communication 
+                 using OCR (spmd, split-phase execution)
+
 
 # OCR configurations
 
