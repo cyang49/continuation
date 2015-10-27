@@ -32,6 +32,8 @@
     }
 
 #define MYRANK ((u64) ocrElsUserGet(0))
+#define DEFAULT_LG_PROPS GUID_PROP_IS_LABELED | GUID_PROP_CHECK | EVT_PROP_TAKES_ARG
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,7 +52,6 @@ typedef struct {
     ocrGuid_t   shutdown_edt_guid;                          // guid of the shutdown EDT
     ocrGuid_t   type1Map;                                   // map of a procEdt phase to an EDT guid 
     ocrGuid_t   type2Map;                                   // map slot of a procEdt phase to an event guid
-    unsigned int comm_event[NP*NP];                         // to calculate communication events between two EDTs
     unsigned int DBs_cont[NP];                              // number of DBs stored in procEDT (global view)
     unsigned int DBs_recv;                                  // number of DBs received (continuation)
     ocrEdtDep_t  DBs[MAX_NUM_PHASE];                        // DBs 
@@ -185,12 +186,14 @@ int comm_send(int src, void *data, int size, int dest, Context* context)
        
     if(MYRANK == src) { // Sender
 	
-	// Get event guid to send data
+	// Get/Create event guid to send data
 	ocrGuid_t EventSendOut_guid = NULL_GUID;
-	s64 tuple[] = {src, dest, context->comm_event[src*NP+dest]};
+//	s64 tuple[] = {src, dest, context->comm_event[src*NP+dest]};
+	s64 tuple[] = {src, dest, context->phase};
 	ocrGuidFromLabel(&EventSendOut_guid, context->type2Map, tuple);
+	ocrEventCreate(&EventSendOut_guid, OCR_EVENT_STICKY_T, DEFAULT_LG_PROPS);
 	printf("(%lu) Sending event guid %lx\n", MYRANK, EventSendOut_guid);
-	printf("(%lu) Map1 guid %lx\n", MYRANK, context->type2Map);  
+	printf("(%lu) Map2 guid %lx\n", MYRANK, context->type2Map);  
 	
 	int *buffer;
  	ocrGuid_t sendDB;
@@ -199,16 +202,6 @@ int comm_send(int src, void *data, int size, int dest, Context* context)
  	
 	*buffer = *(int *)data;
 	printf("(%lu) Sending DB guid %lx - value %d\n", MYRANK, sendDB, *buffer);
-	
-	// create next-event to communicate with dest
-	context->comm_event[src*NP+dest]++;
-	ocrGuid_t nextEventSendOut_guid = NULL_GUID;
-	tuple[0] = src;
-	tuple[1] = dest;
-	tuple[2] = context->comm_event[src*NP+dest];
-	ocrGuidFromLabel(&nextEventSendOut_guid, context->type2Map, tuple);
-	ocrEventCreate(&nextEventSendOut_guid, OCR_EVENT_STICKY_T, GUID_PROP_IS_LABELED | EVT_PROP_NONE);
-	printf("(%lu) Next sending event guid %lx was created\n", MYRANK, nextEventSendOut_guid);
 	
 	context->DBs_cont[dest]++; // a new DB will be sent, update counter
 	context->phase++;
@@ -223,15 +216,15 @@ int comm_send(int src, void *data, int size, int dest, Context* context)
     }
     else if (MYRANK == dest) { // Receiver
 	ocrGuid_t EventSendOut_guid = NULL_GUID;
-	s64 tuple[] = {src, dest, context->comm_event[src*NP+dest]};
+	s64 tuple[] = {src, dest, context->phase};
 	ocrGuidFromLabel(&EventSendOut_guid, context->type2Map, tuple);
+	ocrEventCreate(&EventSendOut_guid, OCR_EVENT_STICKY_T, DEFAULT_LG_PROPS);
  	printf("(%lu) Receiving event guid %lx\n", MYRANK, EventSendOut_guid);
-	printf("(%lu) Map1 guid %lx\n", MYRANK, context->type2Map);
+	printf("(%lu) Map2 guid %lx\n", MYRANK, context->type2Map);
 	
 	//======================================================================
 	// Create continuation to wait for DB sent
 	//======================================================================
-//	unsigned int DBslots = context->DBs_cont[MYRANK];
 	ocrGuid_t procEdt_template_guid;
 	ocrGuid_t procEdt_guid;
 	ocrEdtTemplateCreate(&procEdt_template_guid, procEdt, 1, 4);
@@ -244,13 +237,11 @@ int comm_send(int src, void *data, int size, int dest, Context* context)
 	depv[3] = EventSendOut_guid;
 	
 	context->DBs_recv = 1;     // new DB sent, update counter continuation	
-	context->comm_event[src*NP+dest]++; // move to the next communication event
 	
  	ocrEdtCreate(&procEdt_guid, procEdt_template_guid, /*paramc=*/1, /*paramv=*/(u64 *)&rank, /*depc=*/EDT_PARAM_DEF, 
  		    /*depv=*/depv, /*properties=*/0 , /*affinity*/NULL_GUID,  /*outputEvent*/NULL);
 	printf("(%lu) continuation procEDT template guid %lx\n", MYRANK, procEdt_template_guid);
 	printf("(%lu) continuation procEDT guid %lx\n", MYRANK, procEdt_guid);
-//	printf("(%lu) continuation procEDT DB slots %x\n", MYRANK, DBslots);
 	
 	ocrEdtTemplateDestroy(procEdt_template_guid);
 	
@@ -287,7 +278,7 @@ int comm_send(int src, void *data, int size, int dest, Context* context)
 	else
 	{
 	    // Destroy previously used communication event
-	    s64 tuple2[] = {src, dest, context->comm_event[src*NP+dest]-1};
+	    s64 tuple2[] = {src, dest, context->phase-1};
 	    ocrGuidFromLabel(&EventSendOut_guid, context->type2Map, tuple2);
 	    ocrEventDestroy(EventSendOut_guid);
 	    // Continuation should start from here
@@ -447,7 +438,6 @@ ocrGuid_t procEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
 	context->DBs_recv = 0;
 	for(int i = 0; i < NP; i++) {
 	  context->DBs_cont[i] = 0;
-	  for(int j = 0; j < NP; j++) context->comm_event[i*NP+j] = 0; // events to communicate
 	}
 	
         int argc = getArgc(depv[0].ptr);
@@ -619,20 +609,6 @@ ocrGuid_t mainEdt(u32 paramc, u64 *paramv, u32 depc, ocrEdtDep_t depv[])
     ocrEdtCreate(&shutdownEdt_guid, shutdownEdt_template_guid, /*paramc=*/0, /*paramv=*/NULL, /*depc=*/NP, 
 		 /*depv=*/NULL, /*properties=*/0 , /*affinity*/NULL_GUID,  /*outputEvent*/NULL );
     printf("shutdownEDT guid %lx\n", shutdownEdt_guid);
-   
-    // Create communication events
-    ocrGuid_t EventSendOut_guid = NULL_GUID;
-    s64 tuple[] = {0, 0, 0}; 
-    for(int i = 0; i < NP; i++) {
-      tuple[0] = i;
-      for(int j = 0; j < NP; j++) {
-	tuple[1] = j;
-	ocrGuidFromLabel(&EventSendOut_guid, type2Map, tuple);
-	ocrEventCreate(&EventSendOut_guid, OCR_EVENT_STICKY_T, GUID_PROP_IS_LABELED | EVT_PROP_NONE);
-	printf("Communication event (%d --> %d) guid %lx\n", i, j, EventSendOut_guid); 
-	//printf("Map2 guid %lx\n", type2Map);
-      }
-    }
        
     // Create proc EDT
     ocrGuid_t procEdt_template_guid;
